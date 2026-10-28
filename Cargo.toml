@@ -47,6 +47,16 @@ bitvec = { version = "1.0.1", default-features = false, features = ["alloc", "st
 beamterm-renderer = "1"
 unicode-width = "0.2.2"
 
+[features]
+## Draws cells that carry a hyperlink inside `<a>` elements in the DOM backend.
+hyperlinks = ["ratatui/cell-extensions"]
+
 [dev-dependencies]
 wasm-bindgen-test = "0.3.58"
 critical-section = { version = "1.2", features = ["std"] }
+
+# Cell hyperlinks aren't in a ratatui release yet.
+[patch.crates-io]
+ratatui = { git = "https://github.com/WeirdBrains/ratatui", branch = "multi-char-cells" }
+ratatui-core = { git = "https://github.com/WeirdBrains/ratatui", branch = "multi-char-cells" }
+ratatui-widgets = { git = "https://github.com/WeirdBrains/ratatui", branch = "multi-char-cells" }

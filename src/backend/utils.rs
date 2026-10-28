@@ -30,15 +30,16 @@ pub(crate) fn create_span(document: &Document, cell: &Cell) -> Result<Element, E
     Ok(span)
 }
 
-/// Creates a new `<a>` element with the given cells.
-#[allow(dead_code)]
-pub(crate) fn create_anchor(document: &Document, cells: &[Cell]) -> Result<Element, Error> {
+/// Creates a new `<a>` element for the given hyperlink, to hold the `<span>`s
+/// of the cells it covers. The cells keep their own style.
+#[cfg(feature = "hyperlinks")]
+pub(crate) fn create_anchor(
+    document: &Document,
+    hyperlink: &ratatui::buffer::Hyperlink,
+) -> Result<Element, Error> {
     let anchor = document.create_element("a")?;
-    anchor.set_attribute(
-        "href",
-        &cells.iter().map(|c| c.symbol()).collect::<String>(),
-    )?;
-    anchor.set_attribute("style", &get_cell_style_as_css(&cells[0]))?;
+    anchor.set_attribute("href", hyperlink.uri())?;
+    anchor.set_attribute("style", "color: inherit; text-decoration: none;")?;
     Ok(anchor)
 }
 

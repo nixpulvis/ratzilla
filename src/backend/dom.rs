@@ -72,7 +72,8 @@ impl DomBackendOptions {
 /// This backend uses the DOM to render the content to the screen.
 ///
 /// In other words, it transforms the [`Cell`]s into `<span>`s which are then
-/// appended to a `<pre>` element.
+/// appended to a `<pre>` element. With the `hyperlinks` feature, the spans of
+/// cells that share a hyperlink are wrapped in an `<a>`.
 pub struct DomBackend {
     /// Whether the backend has been initialized.
     initialized: bool,
@@ -80,6 +81,12 @@ pub struct DomBackend {
     pending_resize: Rc<StdCell<Option<GridMeasurement>>>,
     /// Cells.
     cells: Vec<Element>,
+    /// The `<pre>` element of each line.
+    #[cfg(feature = "hyperlinks")]
+    lines: Vec<Element>,
+    /// The hyperlink of each cell.
+    #[cfg(feature = "hyperlinks")]
+    hyperlinks: Vec<Option<ratatui::buffer::Hyperlink>>,
     /// Grid element.
     grid: Element,
     /// The parent of the grid element.
@@ -183,6 +190,10 @@ impl DomBackend {
             initialized: false,
             pending_resize,
             cells: vec![],
+            #[cfg(feature = "hyperlinks")]
+            lines: vec![],
+            #[cfg(feature = "hyperlinks")]
+            hyperlinks: vec![],
             grid: document.create_element("div")?,
             grid_parent,
             options,
@@ -254,6 +265,11 @@ impl DomBackend {
         self.grid = self.document.create_element("div")?;
         self.grid.set_attribute("id", &self.options.grid_id())?;
         self.cells.clear();
+        #[cfg(feature = "hyperlinks")]
+        {
+            self.lines.clear();
+            self.hyperlinks.clear();
+        }
         Ok(())
     }
 
@@ -282,6 +298,42 @@ impl DomBackend {
 
             // Append the <pre> to the grid
             self.grid.append_child(&pre)?;
+            #[cfg(feature = "hyperlinks")]
+            self.lines.push(pre);
+        }
+        #[cfg(feature = "hyperlinks")]
+        self.hyperlinks.resize(self.cells.len(), None);
+        Ok(())
+    }
+
+    /// Puts the spans of a line back in its `<pre>`, with each run of cells
+    /// that share a hyperlink inside one `<a>`.
+    #[cfg(feature = "hyperlinks")]
+    fn link_line(&self, y: u16) -> Result<(), Error> {
+        let line = &self.lines[y as usize];
+        let width = self.size.width as usize;
+        let start = y as usize * width;
+        // The spans are only detached here, so `self.cells` still holds them.
+        line.set_inner_html("");
+        let mut anchor: Option<(Element, &ratatui::buffer::Hyperlink)> = None;
+        for x in start..start + width {
+            let span = &self.cells[x];
+            let Some(hyperlink) = &self.hyperlinks[x] else {
+                anchor = None;
+                line.append_child(span)?;
+                continue;
+            };
+            match &anchor {
+                Some((elem, current)) if *current == hyperlink => {
+                    elem.append_child(span)?;
+                }
+                _ => {
+                    let elem = create_anchor(&self.document, hyperlink)?;
+                    elem.append_child(span)?;
+                    line.append_child(&elem)?;
+                    anchor = Some((elem, hyperlink));
+                }
+            }
         }
         Ok(())
     }
@@ -347,8 +399,15 @@ impl Backend for DomBackend {
             self.populate()?;
         }
 
+        #[cfg(feature = "hyperlinks")]
+        let mut relink = vec![false; self.lines.len()];
         for (x, y, cell) in content {
             let cell_position = (y * self.size.width + x) as usize;
+            #[cfg(feature = "hyperlinks")]
+            if self.hyperlinks[cell_position].as_ref() != cell.hyperlink() {
+                self.hyperlinks[cell_position] = cell.hyperlink().cloned();
+                relink[y as usize] = true;
+            }
             let elem = &self.cells[cell_position];
 
             elem.set_inner_html(cell.symbol());
@@ -365,6 +424,11 @@ impl Backend for DomBackend {
                         .map_err(Error::from)?;
                 }
             }
+        }
+
+        #[cfg(feature = "hyperlinks")]
+        for (y, _) in relink.iter().enumerate().filter(|(_, relink)| **relink) {
+            self.link_line(y as u16)?;
         }
 
         Ok(())
@@ -578,6 +642,53 @@ mod tests {
         terminal
             .draw(|frame| frame.render_widget(Block::bordered(), frame.area()))
             .unwrap();
+    }
+
+    #[cfg(feature = "hyperlinks")]
+    #[wasm_bindgen_test]
+    fn hyperlinks_are_anchors() {
+        use ratatui::{buffer::Hyperlink, layout::Rect, text::Line};
+
+        let parent = sized_parent("hyperlinks_are_anchors", 300, 200);
+        let mut terminal =
+            Terminal::new(DomBackend::new_by_id("hyperlinks_are_anchors").unwrap()).unwrap();
+        let link = Hyperlink::new("https://ratatui.rs").with_id("a");
+        terminal
+            .draw(|frame| {
+                frame.render_widget(Line::from("go ratatui now"), frame.area());
+                frame
+                    .buffer_mut()
+                    .set_hyperlink(Rect::new(3, 0, 7, 1), Some(&link));
+            })
+            .unwrap();
+        let line = parent
+            .first_element_child()
+            .unwrap()
+            .first_element_child()
+            .unwrap();
+        let mut anchors = 0;
+        let mut child = line.first_element_child();
+        while let Some(elem) = child {
+            anchors += usize::from(elem.tag_name() == "A");
+            child = elem.next_element_sibling();
+        }
+        assert_eq!(anchors, 1);
+        let anchor = line.query_selector("a").unwrap().unwrap();
+        assert_eq!(anchor.get_attribute("href").unwrap(), "https://ratatui.rs");
+        assert_eq!(anchor.text_content().unwrap(), "ratatui");
+        assert_eq!(line.text_content().unwrap().trim_end(), "go ratatui now");
+
+        // Taking the link away unwraps the cells again.
+        terminal
+            .draw(|frame| frame.render_widget(Line::from("go ratatui now"), frame.area()))
+            .unwrap();
+        let line = parent
+            .first_element_child()
+            .unwrap()
+            .first_element_child()
+            .unwrap();
+        assert!(line.query_selector("a").unwrap().is_none());
+        assert_eq!(line.text_content().unwrap().trim_end(), "go ratatui now");
     }
 
     #[wasm_bindgen_test]
