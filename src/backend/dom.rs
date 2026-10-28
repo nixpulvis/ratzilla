@@ -589,11 +589,13 @@ impl WebEventHandler for DomBackend {
         // Clear any existing handlers first
         self.clear_key_events();
 
-        // Make the grid element focusable so it can receive key events
-        self.grid.set_attribute("tabindex", "0")?;
+        // Make the grid's parent focusable so it can receive key events. The
+        // grid itself is replaced on a resize, which would lose the listener
+        // and the focus with it.
+        self.grid_parent.set_attribute("tabindex", "0")?;
 
         self.key_callback = Some(EventCallback::new(
-            self.grid.clone(),
+            self.grid_parent.clone(),
             KEY_EVENT_TYPES,
             move |event: web_sys::KeyboardEvent| {
                 callback(event.into());
@@ -748,6 +750,34 @@ mod tests {
         init.set_bubbles(true);
         let event =
             web_sys::MouseEvent::new_with_mouse_event_init_dict("mousedown", &init).unwrap();
+        grid.dispatch_event(&event).unwrap();
+        assert_eq!(events.get(), 1);
+    }
+
+    #[wasm_bindgen_test]
+    fn key_events_after_resize() {
+        let parent = sized_parent("key_events_after_resize", 300, 200);
+        let mut terminal =
+            Terminal::new(DomBackend::new_by_id("key_events_after_resize").unwrap()).unwrap();
+        let events = Rc::new(StdCell::new(0));
+        let count = events.clone();
+        terminal
+            .backend_mut()
+            .on_key_event(move |_| count.set(count.get() + 1))
+            .unwrap();
+        draw(&mut terminal);
+
+        // A new size replaces the grid element.
+        set_parent_size(&parent, 400, 300);
+        fire_resize();
+        draw(&mut terminal);
+
+        let grid = parent.first_element_child().unwrap();
+        let init = web_sys::KeyboardEventInit::new();
+        init.set_bubbles(true);
+        init.set_key("j");
+        let event =
+            web_sys::KeyboardEvent::new_with_keyboard_event_init_dict("keydown", &init).unwrap();
         grid.dispatch_event(&event).unwrap();
         assert_eq!(events.get(), 1);
     }
