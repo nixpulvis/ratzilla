@@ -101,6 +101,8 @@ pub struct DomBackend {
     last_cursor_position: Option<Position>,
     /// Buffer size to pass to [`ratatui::Terminal`]
     size: Size,
+    /// The size, shared with the mouse handler, which outlives a resize.
+    shared_size: Rc<StdCell<Size>>,
     /// Measured cell dimensions in pixels (width, height).
     cell_size: (f64, f64),
     /// Resize event callback handler.
@@ -201,6 +203,7 @@ impl DomBackend {
             cursor_position: None,
             last_cursor_position: None,
             size,
+            shared_size: Rc::new(StdCell::new(size)),
             cell_size,
             _resize_callback: resize_callback,
             mouse_callback: None,
@@ -381,6 +384,7 @@ impl Backend for DomBackend {
                 }
             } else {
                 self.size = measured.size;
+                self.shared_size.set(measured.size);
                 self.reset_grid()?;
                 self.initialized = false;
             }
@@ -548,19 +552,23 @@ impl WebEventHandler for DomBackend {
         // Clear any existing handlers first
         self.clear_mouse_events();
 
-        // Configure coordinate translation for DOM backend
-        // Cell dimensions are derived from element dimensions / grid size
-        let config = MouseConfig::new(self.size.width, self.size.height);
-
-        // Use the grid element for coordinate calculation
-        let element = self.grid.clone();
+        // A resize replaces the grid element, so listen on its parent and
+        // look up the grid, and its size, when an event comes in.
+        let parent = self.grid_parent.clone();
+        let selector = format!("#{}", self.options.grid_id());
+        let size = self.shared_size.clone();
 
         // Create mouse event callback
         let mouse_callback = EventCallback::new(
-            self.grid.clone(),
+            self.grid_parent.clone(),
             MOUSE_EVENT_TYPES,
             move |event: web_sys::MouseEvent| {
-                let mouse_event = create_mouse_event(&event, &element, &config);
+                let Ok(Some(grid)) = parent.query_selector(&selector) else {
+                    return;
+                };
+                // Cell dimensions are derived from element dimensions / grid size
+                let config = MouseConfig::new(size.get().width, size.get().height);
+                let mouse_event = create_mouse_event(&event, &grid, &config);
                 callback(mouse_event);
             },
         )?;
@@ -715,6 +723,33 @@ mod tests {
 
         assert_ne!(terminal.size().unwrap(), before);
         assert_eq!(terminal.size().unwrap(), dom_grid_size(&parent));
+    }
+
+    #[wasm_bindgen_test]
+    fn mouse_events_after_resize() {
+        let parent = sized_parent("mouse_events_after_resize", 300, 200);
+        let mut terminal =
+            Terminal::new(DomBackend::new_by_id("mouse_events_after_resize").unwrap()).unwrap();
+        let events = Rc::new(StdCell::new(0));
+        let count = events.clone();
+        terminal
+            .backend_mut()
+            .on_mouse_event(move |_| count.set(count.get() + 1))
+            .unwrap();
+        draw(&mut terminal);
+
+        // A new size replaces the grid element.
+        set_parent_size(&parent, 400, 300);
+        fire_resize();
+        draw(&mut terminal);
+
+        let grid = parent.first_element_child().unwrap();
+        let init = web_sys::MouseEventInit::new();
+        init.set_bubbles(true);
+        let event =
+            web_sys::MouseEvent::new_with_mouse_event_init_dict("mousedown", &init).unwrap();
+        grid.dispatch_event(&event).unwrap();
+        assert_eq!(events.get(), 1);
     }
 
     #[wasm_bindgen_test]
