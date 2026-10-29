@@ -484,9 +484,11 @@ impl WebEventHandler for DomBackend {
         // Clear any existing handlers first
         self.clear_mouse_events();
 
-        // Configure coordinate translation for DOM backend
-        // Cell dimensions are derived from element dimensions / grid size
-        let config = MouseConfig::new(self.size.width, self.size.height);
+        // The grid element is as wide as its parent, not as wide as its
+        // cells, so a pointer position is mapped with the measured cell size
+        // rather than with the element's size over the grid's.
+        let config = MouseConfig::new(self.size.width, self.size.height)
+            .with_cell_dimensions(self.cell_size.0, self.cell_size.1);
 
         // Use the grid element for coordinate calculation
         let element = self.grid.clone();
