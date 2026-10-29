@@ -323,9 +323,10 @@ impl DomBackend {
             .drawn_cursor
             .filter(|cursor| cursor.y == y)
             .map(|cursor| cursor.x as usize);
+        let in_area = |area: Rect| (area.top()..area.bottom()).contains(&y);
         let selectable = match self.drawn_selectable {
             None => 0..width,
-            Some(area) if (area.top()..area.bottom()).contains(&y) => {
+            Some(area) if in_area(area) => {
                 let from = (area.left() as usize).min(width);
                 let to = (area.right() as usize).min(width);
                 let blank = |x: &usize| cells[*x].symbol().trim().is_empty();
@@ -363,6 +364,11 @@ impl DomBackend {
                 update_css_field(self.options.cursor_shape.get_css_attribute(), &span)?;
             }
             line.append_child(&span)?;
+        }
+        // Otherwise a blank line in the area is left out of a copy.
+        if selectable.is_empty() && self.drawn_selectable.is_some_and(in_area) {
+            let br = self.document.create_element("br")?;
+            line.append_child(&br)?;
         }
         Ok(())
     }
@@ -687,7 +693,7 @@ mod tests {
         terminal
             .backend()
             .selectable_area()
-            .set(Some(Rect::new(1, 1, 20, 1)));
+            .set(Some(Rect::new(1, 1, 20, 2)));
         terminal
             .draw(|frame| {
                 frame.render_widget(Block::bordered(), frame.area());
@@ -710,7 +716,10 @@ mod tests {
         let grid = parent.first_element_child().unwrap();
         let top = grid.first_element_child().unwrap();
         assert_eq!(selectable(top.clone()), "");
-        assert_eq!(selectable(top.next_element_sibling().unwrap()), "hi there");
+        let text = top.next_element_sibling().unwrap();
+        assert_eq!(selectable(text.clone()), "hi there");
+        let blank = text.next_element_sibling().unwrap();
+        assert_eq!(blank.last_element_child().unwrap().tag_name(), "BR");
     }
 
     #[wasm_bindgen_test]
