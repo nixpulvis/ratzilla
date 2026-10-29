@@ -71,22 +71,19 @@ impl DomBackendOptions {
 ///
 /// This backend uses the DOM to render the content to the screen.
 ///
-/// In other words, it transforms the [`Cell`]s into `<span>`s which are then
-/// appended to a `<pre>` element. With the `hyperlinks` feature, the spans of
-/// cells that share a hyperlink are wrapped in an `<a>`.
+/// In other words, it draws each line of [`Cell`]s as a `<pre>` element, with
+/// a `<span>` for each run of cells that look the same. With the
+/// `hyperlinks` feature, the spans of cells that share a hyperlink are
+/// wrapped in an `<a>`.
 pub struct DomBackend {
     /// Whether the backend has been initialized.
     initialized: bool,
     /// Size measured on resize, applied by the next draw.
     pending_resize: Rc<StdCell<Option<GridMeasurement>>>,
-    /// Cells.
-    cells: Vec<Element>,
+    /// Cells, as last drawn.
+    cells: Vec<Cell>,
     /// The `<pre>` element of each line.
-    #[cfg(feature = "hyperlinks")]
     lines: Vec<Element>,
-    /// The hyperlink of each cell.
-    #[cfg(feature = "hyperlinks")]
-    hyperlinks: Vec<Option<ratatui::buffer::Hyperlink>>,
     /// Grid element.
     grid: Element,
     /// The parent of the grid element.
@@ -97,8 +94,10 @@ pub struct DomBackend {
     options: DomBackendOptions,
     /// Cursor position.
     cursor_position: Option<Position>,
-    /// Last Cursor position.
-    last_cursor_position: Option<Position>,
+    /// Whether the cursor is shown.
+    cursor_shown: bool,
+    /// Where the cursor is drawn, if anywhere.
+    drawn_cursor: Option<Position>,
     /// Buffer size to pass to [`ratatui::Terminal`]
     size: Size,
     /// The size, shared with the mouse handler, which outlives a resize.
@@ -192,16 +191,14 @@ impl DomBackend {
             initialized: false,
             pending_resize,
             cells: vec![],
-            #[cfg(feature = "hyperlinks")]
             lines: vec![],
-            #[cfg(feature = "hyperlinks")]
-            hyperlinks: vec![],
             grid: document.create_element("div")?,
             grid_parent,
             options,
             document,
             cursor_position: None,
-            last_cursor_position: None,
+            cursor_shown: false,
+            drawn_cursor: None,
             size,
             shared_size: Rc::new(StdCell::new(size)),
             cell_size,
@@ -268,11 +265,7 @@ impl DomBackend {
         self.grid = self.document.create_element("div")?;
         self.grid.set_attribute("id", &self.options.grid_id())?;
         self.cells.clear();
-        #[cfg(feature = "hyperlinks")]
-        {
-            self.lines.clear();
-            self.hyperlinks.clear();
-        }
+        self.lines.clear();
         Ok(())
     }
 
@@ -281,62 +274,99 @@ impl DomBackend {
     /// This function is called from [`draw`] once (or after a resize)
     /// to render the right number of cells to the screen.
     fn populate(&mut self) -> Result<(), Error> {
-        for _y in 0..self.size.height {
-            let mut line_cells: Vec<Element> = Vec::new();
-            for _x in 0..self.size.width {
-                let span = create_span(&self.document, &Cell::default())?;
-                self.cells.push(span.clone());
-                line_cells.push(span);
-            }
-
-            // Create a <pre> element for the line
+        let (width, height) = (self.size.width as usize, self.size.height as usize);
+        self.cells = vec![Cell::default(); width * height];
+        let line_height = format!("height: {}px;", self.cell_size.1);
+        for y in 0..self.size.height {
             let pre = self.document.create_element("pre")?;
-            let line_height = format!("height: {}px;", self.cell_size.1);
             pre.set_attribute("style", &line_height)?;
-
-            // Append all elements (spans and anchors) to the <pre>
-            for elem in line_cells {
-                pre.append_child(&elem)?;
-            }
-
-            // Append the <pre> to the grid
             self.grid.append_child(&pre)?;
-            #[cfg(feature = "hyperlinks")]
             self.lines.push(pre);
+            self.draw_line(y)?;
         }
-        #[cfg(feature = "hyperlinks")]
-        self.hyperlinks.resize(self.cells.len(), None);
         Ok(())
     }
 
-    /// Puts the spans of a line back in its `<pre>`, with each run of cells
-    /// that share a hyperlink inside one `<a>`.
-    #[cfg(feature = "hyperlinks")]
-    fn link_line(&self, y: u16) -> Result<(), Error> {
+    /// Draws line `y` from its cells, with a `<span>` for each run of cells
+    /// that look the same. The cursor's cell gets one of its own, and with
+    /// the `hyperlinks` feature, linked runs go inside an `<a>`.
+    fn draw_line(&self, y: u16) -> Result<(), Error> {
         let line = &self.lines[y as usize];
         let width = self.size.width as usize;
-        let start = y as usize * width;
-        // The spans are only detached here, so `self.cells` still holds them.
-        line.set_inner_html("");
+        let cells = &self.cells[y as usize * width..][..width];
+        let cursor = self
+            .drawn_cursor
+            .filter(|cursor| cursor.y == y)
+            .map(|cursor| cursor.x as usize);
+        #[cfg(feature = "hyperlinks")]
+        let same_link = |a: &Cell, b: &Cell| a.hyperlink() == b.hyperlink();
+        #[cfg(not(feature = "hyperlinks"))]
+        let same_link = |_: &Cell, _: &Cell| true;
+        #[cfg(feature = "hyperlinks")]
         let mut anchor: Option<(Element, &ratatui::buffer::Hyperlink)> = None;
-        for x in start..start + width {
-            let span = &self.cells[x];
-            let Some(hyperlink) = &self.hyperlinks[x] else {
-                anchor = None;
-                line.append_child(span)?;
-                continue;
-            };
-            match &anchor {
-                Some((elem, current)) if *current == hyperlink => {
-                    elem.append_child(span)?;
-                }
-                _ => {
-                    let elem = create_anchor(&self.document, hyperlink)?;
-                    elem.append_child(span)?;
-                    line.append_child(&elem)?;
-                    anchor = Some((elem, hyperlink));
-                }
+
+        line.set_text_content(None);
+        let mut x = 0;
+        while x < width {
+            let start = x;
+            let mut text = String::new();
+            let mut columns = 0;
+            while x < width
+                && (x == start
+                    || (looks_alike(&cells[start], &cells[x])
+                        && same_link(&cells[start], &cells[x])
+                        && cursor != Some(start)
+                        && cursor != Some(x)))
+            {
+                let symbol = cells[x].symbol();
+                text.push_str(symbol);
+                columns += symbol.width();
+                // A wide glyph covers the next cell too.
+                x += symbol.width().max(1);
             }
+
+            let style = get_run_style_as_css(&cells[start], columns);
+            let span = create_span(&self.document, &text, &style)?;
+            if cursor == Some(start) {
+                update_css_field(self.options.cursor_shape.get_css_attribute(), &span)?;
+            }
+
+            #[cfg(feature = "hyperlinks")]
+            match cells[start].hyperlink() {
+                None => {
+                    anchor = None;
+                    line.append_child(&span)?;
+                }
+                Some(hyperlink) => match &anchor {
+                    Some((elem, current)) if *current == hyperlink => {
+                        elem.append_child(&span)?;
+                    }
+                    _ => {
+                        let elem = create_anchor(&self.document, hyperlink)?;
+                        elem.append_child(&span)?;
+                        line.append_child(&elem)?;
+                        anchor = Some((elem, hyperlink));
+                    }
+                },
+            }
+            #[cfg(not(feature = "hyperlinks"))]
+            line.append_child(&span)?;
+        }
+        Ok(())
+    }
+
+    /// Redraws the lines the cursor moves between, when it's moved, shown
+    /// or hidden.
+    fn draw_cursor(&mut self) -> Result<(), Error> {
+        let cursor = self.cursor_position.filter(|cursor| {
+            self.cursor_shown && cursor.x < self.size.width && cursor.y < self.size.height
+        });
+        if !self.initialized || cursor == self.drawn_cursor {
+            return Ok(());
+        }
+        let drawn = std::mem::replace(&mut self.drawn_cursor, cursor);
+        for y in [drawn, cursor].into_iter().flatten().map(|cursor| cursor.y) {
+            self.draw_line(y)?;
         }
         Ok(())
     }
@@ -395,7 +425,7 @@ impl Backend for DomBackend {
 
             // Clear cursor position to avoid modifying css style of a non-existent cell
             self.cursor_position = None;
-            self.last_cursor_position = None;
+            self.drawn_cursor = None;
 
             self.grid_parent
                 .append_child(&self.grid)
@@ -403,36 +433,14 @@ impl Backend for DomBackend {
             self.populate()?;
         }
 
-        #[cfg(feature = "hyperlinks")]
-        let mut relink = vec![false; self.lines.len()];
+        // Redraw each changed line once, however many of its cells changed.
+        let mut changed = vec![false; self.lines.len()];
         for (x, y, cell) in content {
-            let cell_position = (y * self.size.width + x) as usize;
-            #[cfg(feature = "hyperlinks")]
-            if self.hyperlinks[cell_position].as_ref() != cell.hyperlink() {
-                self.hyperlinks[cell_position] = cell.hyperlink().cloned();
-                relink[y as usize] = true;
-            }
-            let elem = &self.cells[cell_position];
-
-            set_cell_text(elem, cell.symbol());
-            elem.set_attribute("style", &get_cell_style_as_css(cell))
-                .map_err(Error::from)?;
-
-            // don't display the next cell if a fullwidth glyph preceeds it
-            if cell.symbol().len() > 1 && cell.symbol().width() == 2 {
-                if (cell_position + 1) < self.cells.len() {
-                    let next_elem = &self.cells[cell_position + 1];
-                    set_cell_text(next_elem, "");
-                    next_elem
-                        .set_attribute("style", &get_cell_style_as_css(&Cell::new("")))
-                        .map_err(Error::from)?;
-                }
-            }
+            self.cells[(y * self.size.width + x) as usize] = cell.clone();
+            changed[y as usize] = true;
         }
-
-        #[cfg(feature = "hyperlinks")]
-        for (y, _) in relink.iter().enumerate().filter(|(_, relink)| **relink) {
-            self.link_line(y as u16)?;
+        for (y, _) in changed.iter().enumerate().filter(|(_, changed)| **changed) {
+            self.draw_line(y as u16)?;
         }
 
         Ok(())
@@ -447,43 +455,13 @@ impl Backend for DomBackend {
     }
 
     fn hide_cursor(&mut self) -> IoResult<()> {
-        if let Some(pos) = self.cursor_position {
-            let cell_position = (pos.y * self.size.width + pos.x) as usize;
-
-            // Use CursorShape::None to clear cursor CSS
-            update_css_field(
-                CursorShape::None.get_css_attribute(),
-                &self.cells[cell_position],
-            )
-            .map_err(Error::from)?;
-        }
-
-        Ok(())
+        self.cursor_shown = false;
+        Ok(self.draw_cursor()?)
     }
 
     fn show_cursor(&mut self) -> IoResult<()> {
-        // Remove cursor at last position
-        if let Some(pos) = self.last_cursor_position {
-            let cell_position = (pos.y * self.size.width + pos.x) as usize;
-            update_css_field(
-                CursorShape::None.get_css_attribute(),
-                &self.cells[cell_position],
-            )
-            .map_err(Error::from)?;
-        }
-
-        // Show cursor at current position
-        if let Some(pos) = self.cursor_position {
-            let cell_position = (pos.y * self.size.width + pos.x) as usize;
-
-            update_css_field(
-                self.options.cursor_shape.get_css_attribute(),
-                &self.cells[cell_position],
-            )
-            .map_err(Error::from)?;
-        }
-
-        Ok(())
+        self.cursor_shown = true;
+        Ok(self.draw_cursor()?)
     }
 
     fn get_cursor(&mut self) -> IoResult<(u16, u16)> {
@@ -530,10 +508,8 @@ impl Backend for DomBackend {
 
     /// Update cursor_position and last_cursor_position
     fn set_cursor_position<P: Into<Position>>(&mut self, position: P) -> IoResult<()> {
-        self.last_cursor_position = self.cursor_position;
         self.cursor_position = Some(position.into());
-
-        Ok(())
+        Ok(self.draw_cursor()?)
     }
 
     fn clear_region(&mut self, clear_type: ClearType) -> Result<(), Self::Error> {
@@ -639,8 +615,8 @@ mod tests {
     fn dom_grid_size(parent: &Element) -> Size {
         let grid = parent.first_element_child().unwrap();
         let rows = grid.child_element_count();
-        let cols = grid.first_element_child().unwrap().child_element_count();
-        Size::new(cols as u16, rows as u16)
+        let line = grid.first_element_child().unwrap().text_content().unwrap();
+        Size::new(line.chars().count() as u16, rows as u16)
     }
 
     fn fire_resize() {
@@ -780,6 +756,17 @@ mod tests {
             web_sys::KeyboardEvent::new_with_keyboard_event_init_dict("keydown", &init).unwrap();
         grid.dispatch_event(&event).unwrap();
         assert_eq!(events.get(), 1);
+    }
+
+    #[wasm_bindgen_test]
+    fn draws_alike_cells_as_one_span() {
+        let parent = sized_parent("draws_alike_cells_as_one_span", 300, 200);
+        let mut terminal =
+            Terminal::new(DomBackend::new_by_id("draws_alike_cells_as_one_span").unwrap()).unwrap();
+        draw(&mut terminal);
+        let grid = parent.first_element_child().unwrap();
+        // The top border is all one style.
+        assert_eq!(grid.first_element_child().unwrap().child_element_count(), 1);
     }
 
     #[wasm_bindgen_test]
