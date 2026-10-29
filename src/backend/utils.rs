@@ -23,11 +23,20 @@ pub struct CssAttribute {
 /// Creates a new `<span>` element with the given cell.
 pub(crate) fn create_span(document: &Document, cell: &Cell) -> Result<Element, Error> {
     let span = document.create_element("span")?;
-    span.set_inner_html(cell.symbol());
+    set_cell_text(&span, cell.symbol());
 
     let style = get_cell_style_as_css(cell);
     span.set_attribute("style", &style)?;
     Ok(span)
+}
+
+/// Sets the text of a cell's `<span>`, changing its text node in place
+/// rather than replacing it, so redraws don't leave nodes to collect.
+pub(crate) fn set_cell_text(span: &Element, text: &str) {
+    match span.first_child() {
+        Some(node) => node.set_node_value(Some(text)),
+        None => span.set_text_content(Some(text)),
+    }
 }
 
 /// Creates a new `<a>` element for the given hyperlink, to hold the `<span>`s
