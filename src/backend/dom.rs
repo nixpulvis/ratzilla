@@ -606,6 +606,10 @@ impl WebEventHandler for DomBackend {
         let parent = self.grid_parent.clone();
         let selector = format!("#{}", self.options.grid_id());
         let size = self.shared_size.clone();
+        // The grid element is as wide as its parent, not as wide as its
+        // cells, so a pointer position is mapped with the measured cell size
+        // rather than with the element's size over the grid's.
+        let cell_size = self.cell_size;
 
         // Create mouse event callback
         let mouse_callback = EventCallback::new(
@@ -615,8 +619,8 @@ impl WebEventHandler for DomBackend {
                 let Ok(Some(grid)) = parent.query_selector(&selector) else {
                     return;
                 };
-                // Cell dimensions are derived from element dimensions / grid size
-                let config = MouseConfig::new(size.get().width, size.get().height);
+                let config = MouseConfig::new(size.get().width, size.get().height)
+                    .with_cell_dimensions(cell_size.0, cell_size.1);
                 let mouse_event = create_mouse_event(&event, &grid, &config);
                 callback(mouse_event);
             },
