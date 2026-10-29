@@ -36,6 +36,8 @@ const DEFAULT_CELL_SIZE: (f64, f64) = (10.0, 20.0);
 pub struct DomBackendOptions {
     /// The element ID.
     grid_id: Option<String>,
+    /// The element to draw in, instead of looking one up by ID.
+    parent: Option<Element>,
     /// The cursor shape.
     cursor_shape: CursorShape,
 }
@@ -45,8 +47,16 @@ impl DomBackendOptions {
     pub fn new(grid_id: Option<String>, cursor_shape: CursorShape) -> Self {
         Self {
             grid_id,
+            parent: None,
             cursor_shape,
         }
+    }
+
+    /// Draws in the given element, which can be one `getElementById` can't
+    /// find, like an element in a shadow root.
+    pub fn parent(mut self, parent: Element) -> Self {
+        self.parent = Some(parent);
+        self
     }
 
     /// Returns the grid ID.
@@ -154,6 +164,11 @@ impl DomBackend {
         ))
     }
 
+    /// Constructs a new [`DomBackend`] that draws in the given element.
+    pub fn new_by_element(parent: Element) -> Result<Self, Error> {
+        Self::new_with_options(DomBackendOptions::default().parent(parent))
+    }
+
     /// Set the [`CursorShape`].
     pub fn set_cursor_shape(mut self, shape: CursorShape) -> Self {
         self.options.cursor_shape = shape;
@@ -164,7 +179,10 @@ impl DomBackend {
     pub fn new_with_options(options: DomBackendOptions) -> Result<Self, Error> {
         let window = window().ok_or(Error::UnableToRetrieveWindow)?;
         let document = window.document().ok_or(Error::UnableToRetrieveDocument)?;
-        let grid_parent = get_element_by_id_or_body(options.grid_id.as_ref())?;
+        let grid_parent = match &options.parent {
+            Some(parent) => parent.clone(),
+            None => get_element_by_id_or_body(options.grid_id.as_ref())?,
+        };
         let cell_size =
             Self::measure_cell_size(&document, &grid_parent).unwrap_or(DEFAULT_CELL_SIZE);
         let size = Self::calculate_size(&grid_parent, cell_size);
@@ -175,9 +193,9 @@ impl DomBackend {
             let pending_resize = pending_resize.clone();
             let document = document.clone();
             let grid_parent = grid_parent.clone();
-            let grid_id = options.grid_id();
+            let grid = format!("#{}", options.grid_id());
             move |_: web_sys::Event| {
-                if document.get_element_by_id(&grid_id).is_some() {
+                if let Ok(Some(_)) = grid_parent.query_selector(&grid) {
                     grid_parent.set_inner_html("");
                 }
                 let cell_size =
@@ -675,6 +693,30 @@ mod tests {
             .unwrap();
         assert!(line.query_selector("a").unwrap().is_none());
         assert_eq!(line.text_content().unwrap().trim_end(), "go ratatui now");
+    }
+
+    #[wasm_bindgen_test]
+    fn draws_in_a_shadow_root() {
+        let host = sized_parent("draws_in_a_shadow_root", 300, 200);
+        let shadow = host
+            .attach_shadow(&web_sys::ShadowRootInit::new(web_sys::ShadowRootMode::Open))
+            .unwrap();
+        let document = window().unwrap().document().unwrap();
+        let parent = document.create_element("div").unwrap();
+        set_parent_size(&parent, 300, 200);
+        shadow.append_child(&parent).unwrap();
+
+        let mut terminal =
+            Terminal::new(DomBackend::new_by_element(parent.clone()).unwrap()).unwrap();
+        draw(&mut terminal);
+        assert_eq!(terminal.size().unwrap(), dom_grid_size(&parent));
+
+        // A resize still replaces the grid rather than adding another.
+        set_parent_size(&parent, 200, 100);
+        fire_resize();
+        draw(&mut terminal);
+        assert_eq!(parent.child_element_count(), 1);
+        assert_eq!(terminal.size().unwrap(), dom_grid_size(&parent));
     }
 
     #[wasm_bindgen_test]
