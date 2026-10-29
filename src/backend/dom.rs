@@ -7,7 +7,7 @@ use std::{
 use ratatui::{
     backend::WindowSize,
     buffer::Cell,
-    layout::{Position, Size},
+    layout::{Position, Rect, Size},
     prelude::{backend::ClearType, Backend},
 };
 use web_sys::{window, Document, Element};
@@ -67,6 +67,24 @@ impl DomBackendOptions {
     }
 }
 
+/// The part of the screen whose text can be selected, shared between a
+/// [`DomBackend`] and whatever draws on it, which knows where its text is.
+///
+/// By default all of the screen can be selected. Once an area is set, only
+/// the cells inside it can, up to the last non-blank cell of each line, so
+/// borders, margins and other chrome are left out of a selection and of
+/// what's copied.
+#[derive(Debug, Clone, Default)]
+pub struct SelectableArea(Rc<StdCell<Option<Rect>>>);
+
+impl SelectableArea {
+    /// Lets only the text in `area` be selected, or all of the screen with
+    /// `None`. Takes effect on the next draw.
+    pub fn set(&self, area: Option<Rect>) {
+        self.0.set(area);
+    }
+}
+
 /// DOM backend.
 ///
 /// This backend uses the DOM to render the content to the screen.
@@ -96,6 +114,10 @@ pub struct DomBackend {
     cursor_shown: bool,
     /// Where the cursor is drawn, if anywhere.
     drawn_cursor: Option<Position>,
+    /// The part of the screen whose text can be selected.
+    selectable: SelectableArea,
+    /// The selectable area as last drawn.
+    drawn_selectable: Option<Rect>,
     /// Buffer size to pass to [`ratatui::Terminal`]
     size: Size,
     /// Measured cell dimensions in pixels (width, height).
@@ -150,6 +172,12 @@ impl DomBackend {
         ))
     }
 
+    /// Returns the [`SelectableArea`] of this backend, to set it while
+    /// drawing.
+    pub fn selectable_area(&self) -> SelectableArea {
+        self.selectable.clone()
+    }
+
     /// Set the [`CursorShape`].
     pub fn set_cursor_shape(mut self, shape: CursorShape) -> Self {
         self.options.cursor_shape = shape;
@@ -195,6 +223,8 @@ impl DomBackend {
             cursor_position: None,
             cursor_shown: false,
             drawn_cursor: None,
+            selectable: SelectableArea::default(),
+            drawn_selectable: None,
             size,
             cell_size,
             _resize_callback: resize_callback,
@@ -283,7 +313,8 @@ impl DomBackend {
     }
 
     /// Draws line `y` from its cells, with a `<span>` for each run of cells
-    /// that look the same. The cursor's cell gets one of its own.
+    /// that look the same. The cursor's cell gets one of its own, and cells
+    /// outside the selectable area are kept out of any selection.
     fn draw_line(&self, y: u16) -> Result<(), Error> {
         let line = &self.lines[y as usize];
         let width = self.size.width as usize;
@@ -292,6 +323,16 @@ impl DomBackend {
             .drawn_cursor
             .filter(|cursor| cursor.y == y)
             .map(|cursor| cursor.x as usize);
+        let selectable = match self.drawn_selectable {
+            None => 0..width,
+            Some(area) if (area.top()..area.bottom()).contains(&y) => {
+                let from = (area.left() as usize).min(width);
+                let to = (area.right() as usize).min(width);
+                let blank = |x: &usize| cells[*x].symbol().trim().is_empty();
+                from..(from..to).rev().find(|x| !blank(x)).map_or(from, |x| x + 1)
+            }
+            Some(_) => 0..0,
+        };
 
         line.set_text_content(None);
         let mut x = 0;
@@ -303,7 +344,8 @@ impl DomBackend {
                 && (x == start
                     || (looks_alike(&cells[start], &cells[x])
                         && cursor != Some(start)
-                        && cursor != Some(x)))
+                        && cursor != Some(x)
+                        && selectable.contains(&start) == selectable.contains(&x)))
             {
                 let symbol = cells[x].symbol();
                 text.push_str(symbol);
@@ -312,7 +354,10 @@ impl DomBackend {
                 x += symbol.width().max(1);
             }
 
-            let style = get_run_style_as_css(&cells[start], columns);
+            let mut style = get_run_style_as_css(&cells[start], columns);
+            if !selectable.contains(&start) {
+                style.push_str(" user-select: none; -webkit-user-select: none;");
+            }
             let span = create_span(&self.document, &text, &style)?;
             if cursor == Some(start) {
                 update_css_field(self.options.cursor_shape.get_css_attribute(), &span)?;
@@ -399,8 +444,12 @@ impl Backend for DomBackend {
             self.populate()?;
         }
 
-        // Redraw each changed line once, however many of its cells changed.
-        let mut changed = vec![false; self.lines.len()];
+        // Redraw each changed line once, however many of its cells changed,
+        // or every line when the selectable area has moved.
+        let selectable = self.selectable.0.get();
+        let moved = selectable != self.drawn_selectable;
+        self.drawn_selectable = selectable;
+        let mut changed = vec![moved; self.lines.len()];
         for (x, y, cell) in content {
             self.cells[(y * self.size.width + x) as usize] = cell.clone();
             changed[y as usize] = true;
@@ -625,6 +674,43 @@ mod tests {
         let grid = parent.first_element_child().unwrap();
         // The top border is all one style.
         assert_eq!(grid.first_element_child().unwrap().child_element_count(), 1);
+    }
+
+    #[wasm_bindgen_test]
+    fn selects_only_the_selectable_area() {
+        use ratatui::text::Line;
+
+        let parent = sized_parent("selects_only_the_selectable_area", 300, 200);
+        let mut terminal =
+            Terminal::new(DomBackend::new_by_id("selects_only_the_selectable_area").unwrap())
+                .unwrap();
+        terminal
+            .backend()
+            .selectable_area()
+            .set(Some(Rect::new(1, 1, 20, 1)));
+        terminal
+            .draw(|frame| {
+                frame.render_widget(Block::bordered(), frame.area());
+                frame.render_widget(Line::from("hi there"), Rect::new(1, 1, 20, 1));
+            })
+            .unwrap();
+
+        let selectable = |line: Element| {
+            let mut text = String::new();
+            let mut span = line.first_element_child();
+            while let Some(elem) = span {
+                let style = elem.get_attribute("style").unwrap();
+                if !style.contains("user-select: none") {
+                    text.push_str(&elem.text_content().unwrap());
+                }
+                span = elem.next_element_sibling();
+            }
+            text
+        };
+        let grid = parent.first_element_child().unwrap();
+        let top = grid.first_element_child().unwrap();
+        assert_eq!(selectable(top.clone()), "");
+        assert_eq!(selectable(top.next_element_sibling().unwrap()), "hi there");
     }
 
     #[wasm_bindgen_test]
