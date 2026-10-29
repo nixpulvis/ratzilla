@@ -20,23 +20,12 @@ pub struct CssAttribute {
     pub value: Option<&'static str>,
 }
 
-/// Creates a new `<span>` element with the given cell.
-pub(crate) fn create_span(document: &Document, cell: &Cell) -> Result<Element, Error> {
+/// Creates a new `<span>` element with the given text and style.
+pub(crate) fn create_span(document: &Document, text: &str, style: &str) -> Result<Element, Error> {
     let span = document.create_element("span")?;
-    set_cell_text(&span, cell.symbol());
-
-    let style = get_cell_style_as_css(cell);
-    span.set_attribute("style", &style)?;
+    span.set_text_content(Some(text));
+    span.set_attribute("style", style)?;
     Ok(span)
-}
-
-/// Sets the text of a cell's `<span>`, changing its text node in place
-/// rather than replacing it, so redraws don't leave nodes to collect.
-pub(crate) fn set_cell_text(span: &Element, text: &str) {
-    match span.first_child() {
-        Some(node) => node.set_node_value(Some(text)),
-        None => span.set_text_content(Some(text)),
-    }
 }
 
 /// Creates a new `<a>` element with the given cells.
@@ -53,6 +42,21 @@ pub(crate) fn create_anchor(document: &Document, cells: &[Cell]) -> Result<Eleme
 
 /// Converts a cell to a CSS style.
 pub(crate) fn get_cell_style_as_css(cell: &Cell) -> String {
+    get_run_style_as_css(cell, cell.symbol().width())
+}
+
+/// Whether two cells are drawn the same way, apart from their symbols, so
+/// they can share a `<span>`.
+pub(crate) fn looks_alike(a: &Cell, b: &Cell) -> bool {
+    a.fg == b.fg
+        && a.bg == b.bg
+        && a.modifier == b.modifier
+        && contains_braille(a) == contains_braille(b)
+}
+
+/// Converts a run of cells that look like `cell`, `width` columns wide, to a
+/// CSS style.
+pub(crate) fn get_run_style_as_css(cell: &Cell, width: usize) -> String {
     let mut fg = ansi_to_rgb(cell.fg);
     let mut bg = ansi_to_rgb(cell.bg);
 
@@ -108,7 +112,7 @@ pub(crate) fn get_cell_style_as_css(cell: &Cell) -> String {
         ""
     };
 
-    let sizing = format!("display: inline-block; width: {}ch;", cell.symbol().width());
+    let sizing = format!("display: inline-block; width: {width}ch;");
 
     format!("{fg_style} {bg_style} {modifier_style} {braille_style} {sizing}")
 }
