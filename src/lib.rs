@@ -29,7 +29,7 @@ pub use backend::{
     canvas::CanvasBackend,
     cell_sized::CellSized,
     cursor::CursorShape,
-    dom::DomBackend,
+    dom::{DomBackend, SelectableArea},
     webgl2::{FontAtlasConfig, SelectionMode, WebGl2Backend},
 };
 pub use render::{WebEventHandler, WebRenderer};
