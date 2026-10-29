@@ -351,7 +351,7 @@ impl Backend for DomBackend {
             let cell_position = (y * self.size.width + x) as usize;
             let elem = &self.cells[cell_position];
 
-            elem.set_inner_html(cell.symbol());
+            set_cell_text(elem, cell.symbol());
             elem.set_attribute("style", &get_cell_style_as_css(cell))
                 .map_err(Error::from)?;
 
@@ -359,7 +359,7 @@ impl Backend for DomBackend {
             if cell.symbol().len() > 1 && cell.symbol().width() == 2 {
                 if (cell_position + 1) < self.cells.len() {
                     let next_elem = &self.cells[cell_position + 1];
-                    next_elem.set_inner_html("");
+                    set_cell_text(next_elem, "");
                     next_elem
                         .set_attribute("style", &get_cell_style_as_css(&Cell::new("")))
                         .map_err(Error::from)?;
