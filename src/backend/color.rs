@@ -38,6 +38,31 @@ pub(super) fn ansi_to_rgb(color: Color) -> Option<(u8, u8, u8)> {
     }
 }
 
+/// The terminal palette number of `color`, 0 to 255, for the named colors
+/// and indexed ones. `None` for RGB colors and `Reset`.
+pub(super) fn palette_index(color: Color) -> Option<u8> {
+    Some(match color {
+        Color::Black => 0,
+        Color::Red => 1,
+        Color::Green => 2,
+        Color::Yellow => 3,
+        Color::Blue => 4,
+        Color::Magenta => 5,
+        Color::Cyan => 6,
+        Color::Gray => 7,
+        Color::DarkGray => 8,
+        Color::LightRed => 9,
+        Color::LightGreen => 10,
+        Color::LightYellow => 11,
+        Color::LightBlue => 12,
+        Color::LightMagenta => 13,
+        Color::LightCyan => 14,
+        Color::White => 15,
+        Color::Indexed(index) => index,
+        Color::Rgb(..) | Color::Reset => return None,
+    })
+}
+
 /// Returns the actual foreground color of a cell, considering the `REVERSED` modifier.
 pub(super) fn actual_fg_color(cell: &Cell) -> Color {
     if cell.modifier.contains(Modifier::REVERSED) {
@@ -175,5 +200,17 @@ mod tests {
         // Test indexed colors
         assert_eq!(ansi_to_rgb(Color::Indexed(1)), Some((205, 0, 0)));
         assert_eq!(ansi_to_rgb(Color::Indexed(68)), Some((0x5f, 0x87, 0xd7)));
+    }
+
+    #[test]
+    fn test_palette_index() {
+        assert_eq!(palette_index(Color::Black), Some(0));
+        assert_eq!(palette_index(Color::DarkGray), Some(8));
+        assert_eq!(palette_index(Color::White), Some(15));
+        // Named colors and indexed ones share their palette numbers.
+        assert_eq!(palette_index(Color::Red), palette_index(Color::Indexed(1)));
+        assert_eq!(palette_index(Color::Indexed(234)), Some(234));
+        assert_eq!(palette_index(Color::Rgb(1, 2, 3)), None);
+        assert_eq!(palette_index(Color::Reset), None);
     }
 }
