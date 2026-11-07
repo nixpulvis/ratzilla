@@ -1,5 +1,5 @@
 use crate::{
-    backend::color::ansi_to_rgb,
+    backend::color::{ansi_to_rgb, palette_index},
     error::Error,
     utils::{get_screen_size, get_window_size, is_mobile},
 };
@@ -42,35 +42,37 @@ pub(crate) fn create_anchor(document: &Document, cells: &[Cell]) -> Result<Eleme
     Ok(anchor)
 }
 
+/// A color as CSS, or `None` for `Reset`.
+///
+/// Palette colors, named or indexed, read the page's `--ratzilla-color-<n>`
+/// custom property, and fall back to the built-in RGB value. RGB colors are
+/// written as they are.
+fn css_color(color: Color) -> Option<String> {
+    let (r, g, b) = ansi_to_rgb(color)?;
+    let rgb = format!("rgb({r}, {g}, {b})");
+    Some(match palette_index(color) {
+        Some(index) => format!("var(--ratzilla-color-{index}, {rgb})"),
+        None => rgb,
+    })
+}
+
 /// Converts a cell to a CSS style.
 pub(crate) fn get_cell_style_as_css(cell: &Cell) -> String {
-    let mut fg = ansi_to_rgb(cell.fg);
-    let mut bg = ansi_to_rgb(cell.bg);
-
-    if cell.modifier.contains(Modifier::REVERSED) {
-        std::mem::swap(&mut fg, &mut bg);
-    }
-
-    let fg_style = match fg {
-        Some(color) => format!("color: rgb({}, {}, {});", color.0, color.1, color.2),
-        None => "color: rgb(255, 255, 255);".to_string(),
+    // `Reset` is the page's default text color and background, like a
+    // terminal's. Reversed, the two trade places, and without the custom
+    // properties both are white, as before.
+    let fg = css_color(cell.fg)
+        .unwrap_or_else(|| "var(--ratzilla-foreground, rgb(255, 255, 255))".into());
+    let bg = css_color(cell.bg);
+    let (color, background) = if cell.modifier.contains(Modifier::REVERSED) {
+        let bg = bg.unwrap_or_else(|| "var(--ratzilla-background, rgb(255, 255, 255))".into());
+        (bg, fg)
+    } else {
+        let bg = bg.unwrap_or_else(|| "var(--ratzilla-background, transparent)".into());
+        (fg, bg)
     };
-
-    let bg_style = match bg {
-        Some(color) => format!(
-            "background-color: rgb({}, {}, {});",
-            color.0, color.1, color.2
-        ),
-        None => {
-            // If the cell needs to be reversed but we don't have a valid background,
-            // then default the background to white.
-            if cell.modifier.contains(Modifier::REVERSED) {
-                "background-color: rgb(255, 255, 255);".to_string()
-            } else {
-                "background-color: transparent;".to_string()
-            }
-        }
-    };
+    let fg_style = format!("color: {color};");
+    let bg_style = format!("background-color: {background};");
 
     let mut modifier_style = String::new();
     if cell.modifier.contains(Modifier::BOLD) {
